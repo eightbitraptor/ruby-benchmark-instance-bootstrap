@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${BENCH_DEBUG:-0} == 1 ]]; then
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    set -x
+fi
 
 REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 FILES_DIR="$REPO_DIR/files"
@@ -132,11 +136,12 @@ phase_chruby() {
         ( cd "$workdir/chruby-$tag" && make install )
     fi
 
-    install -m 0644 /dev/stdin /etc/profile.d/chruby.sh <<'EOF'
+    cat > /etc/profile.d/chruby.sh <<'EOF'
 if [ -f /usr/local/share/chruby/chruby.sh ]; then
     . /usr/local/share/chruby/chruby.sh
 fi
 EOF
+    chmod 0644 /etc/profile.d/chruby.sh
     info "/etc/profile.d/chruby.sh installed (auto.sh intentionally not sourced)"
 
     ensure_dir "$TARGET_HOME/.rubies"
@@ -145,7 +150,7 @@ EOF
 phase_rustup() {
     step "rustup (stable + nightly)"
 
-    install -m 0644 /dev/stdin /etc/profile.d/cargo.sh <<'EOF'
+    cat > /etc/profile.d/cargo.sh <<'EOF'
 if [ -d "$HOME/.cargo/bin" ]; then
     case ":$PATH:" in
         *":$HOME/.cargo/bin:"*) ;;
@@ -153,6 +158,7 @@ if [ -d "$HOME/.cargo/bin" ]; then
     esac
 fi
 EOF
+    chmod 0644 /etc/profile.d/cargo.sh
 
     if as_user 'command -v rustup >/dev/null'; then
         info "rustup present, updating toolchains"
@@ -203,6 +209,7 @@ phase_repos() {
 
 phase_build_ruby() {
     step "build-ruby script"
+    install -d /usr/local/bin
     install -m 0755 "$FILES_DIR/build-ruby" /usr/local/bin/build-ruby
     info "/usr/local/bin/build-ruby installed"
 }
@@ -223,6 +230,7 @@ phase_autoclave() {
 
 phase_tuning() {
     step "benchmarking stability tweaks"
+    install -d /usr/local/sbin /etc/systemd/system
     install -m 0755 "$FILES_DIR/bench-tuning" /usr/local/sbin/bench-tuning
     install -m 0644 "$FILES_DIR/bench-tuning.service" /etc/systemd/system/bench-tuning.service
     systemctl daemon-reload
