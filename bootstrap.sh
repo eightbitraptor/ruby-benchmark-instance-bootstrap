@@ -217,6 +217,7 @@ phase_autoclave() {
     workdir=$(mktemp -d)
     trap 'rm -rf "$workdir"' RETURN
     git clone --depth 1 https://github.com/silentbicycle/autoclave "$workdir/autoclave"
+    install -d /usr/local/share/man/man1
     ( cd "$workdir/autoclave" && make && make install PREFIX=/usr/local )
 }
 
