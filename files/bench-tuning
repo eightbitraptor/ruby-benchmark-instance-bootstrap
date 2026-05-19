@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+log() { printf '[bench-tuning] %s\n' "$*"; }
+warn() { printf '[bench-tuning] WARN: %s\n' "$*" >&2; }
+
+write_if() {
+    local path=$1 value=$2
+    if [[ -w $path ]]; then
+        printf '%s\n' "$value" > "$path" 2>/dev/null \
+            && log "$path = $value" \
+            || warn "failed to write $path"
+    elif [[ -e $path ]]; then
+        warn "$path not writable, skipping"
+    fi
+}
+
+if [[ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    write_if /sys/devices/system/cpu/intel_pstate/no_turbo 1
+elif [[ -e /sys/devices/system/cpu/cpufreq/boost ]]; then
+    write_if /sys/devices/system/cpu/cpufreq/boost 0
+else
+    warn "no turbo-boost control found"
+fi
+
+shopt -s nullglob
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    write_if "$gov" performance
+done
+shopt -u nullglob
+
+if [[ -e /sys/devices/system/cpu/smt/control ]]; then
+    write_if /sys/devices/system/cpu/smt/control off
+else
+    warn "SMT control not available"
+fi
+
+write_if /proc/sys/kernel/randomize_va_space 0
+write_if /proc/sys/kernel/nmi_watchdog 0
+write_if /proc/sys/kernel/perf_event_paranoid -1
+write_if /proc/sys/kernel/kptr_restrict 0
+write_if /proc/sys/kernel/yama/ptrace_scope 0
+
+write_if /sys/kernel/mm/transparent_hugepage/enabled never
+write_if /sys/kernel/mm/transparent_hugepage/defrag never
+write_if /sys/kernel/mm/transparent_hugepage/khugepaged/defrag 0
+
+log "done"

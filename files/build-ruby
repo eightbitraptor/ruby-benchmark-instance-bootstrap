@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: build-ruby <attribute...> [--prefix=PATH] [--dry-run]
+
+Attributes are composable. Combine a base with any compatible modifiers.
+
+Bases (exactly one required):
+  fast          -O3, no debug symbols, no assertions
+  debug         -O0, debug symbols, ruby_debug=1, devel=1
+
+Debug assertions (only with debug):
+  gc-debug      GC debug assertions (GC_DEBUG=1)
+  gc-check      Full RGENGC verification (RGENGC_CHECK_MODE=2)
+  gc-check-low  Light RGENGC verification (RGENGC_CHECK_MODE=1)
+  vm-check      VM check mode (VM_CHECK_MODE=1)
+
+Sanitizers (at most one):
+  tsan          Thread sanitizer (implies clang)
+  asan          Address sanitizer (implies clang)
+
+Features:
+  modgc         Enable modular GC
+  modgc=<name>  Enable modular GC and build named GC module
+  yjit          YJIT (release with fast, dev with debug)
+  zjit          ZJIT (release with fast, dev with debug)
+  clang         Force clang compiler
+
+Flags:
+  --prefix=PATH Override install prefix
+  --dry-run     Show commands without executing
+  --help, -h    Show this help
+
+Overridable env vars:
+  OPT_LEVEL  DEBUG_FLAGS  RUBY_DEBUG  GC_DEBUG  RGENGC_CHECK_MODE
+  VM_CHECK_MODE  SANITIZER  COMPILER  DEVEL  MODULAR_GC
+
+Examples:
+  build-ruby debug gc-debug gc-check
+  build-ruby fast yjit
+  build-ruby debug gc-check asan modgc=mmtk
+  build-ruby debug vm-check --dry-run
+  build-ruby fast modgc=mmtk --prefix=$HOME/.rubies/ruby-bench
+EOF
+    exit 0
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+# --- Argument parsing ---
+
+dry_run=0
+custom_prefix=""
+attrs=()
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)  dry_run=1 ;;
+        --prefix=*) custom_prefix="${arg#--prefix=}" ;;
+        --help|-h)  usage ;;
+        -*)         die "unknown flag '$arg'" ;;
+        *)          attrs+=("$arg") ;;
+    esac
+done
+
+[[ ${#attrs[@]} -eq 0 ]] && die "at least one attribute required (try 'build-ruby --help')"
+
+# --- Classify attributes ---
+
+base=""
+has_gc_debug=0
+gc_check_attr=""
+has_vm_check=0
+sanitizer_attr=""
+has_modgc=0
+gc_name=""
+jit_attr=""
+has_clang=0
+
+for attr in "${attrs[@]}"; do
+    case "$attr" in
+        fast|debug)
+            [[ -n "$base" ]] && die "cannot combine bases '$base' and '$attr'"
+            base="$attr"
+            ;;
+        gc-debug)
+            has_gc_debug=1
+            ;;
+        gc-check|gc-check-low)
+            [[ -n "$gc_check_attr" ]] && die "cannot combine '$gc_check_attr' and '$attr'"
+            gc_check_attr="$attr"
+            ;;
+        vm-check)
+            has_vm_check=1
+            ;;
+        tsan|asan)
+            [[ -n "$sanitizer_attr" ]] && die "cannot combine '$sanitizer_attr' and '$attr'"
+            sanitizer_attr="$attr"
+            ;;
+        modgc)
+            has_modgc=1
+            ;;
+        modgc=*)
+            has_modgc=1
+            gc_name="${attr#modgc=}"
+            [[ -z "$gc_name" ]] && die "modgc= requires a GC name (e.g. modgc=mmtk)"
+            ;;
+        yjit|zjit)
+            [[ -n "$jit_attr" ]] && die "cannot combine '$jit_attr' and '$attr'"
+            jit_attr="$attr"
+            ;;
+        clang)
+            has_clang=1
+            ;;
+        *)
+            die "unknown attribute '$attr'"
+            ;;
+    esac
+done
+
+# --- Validation ---
+
+[[ -z "$base" ]] && die "a base is required: 'fast' or 'debug'"
+
+if [[ "$base" == "fast" ]]; then
+    [[ "$has_gc_debug" == "1" ]]  && die "'gc-debug' only valid with 'debug' base"
+    [[ -n "$gc_check_attr" ]]     && die "'$gc_check_attr' only valid with 'debug' base"
+    [[ "$has_vm_check" == "1" ]]  && die "'vm-check' only valid with 'debug' base"
+fi
+
+# --- Set defaults from base ---
+
+case "$base" in
+    debug)
+        p_opt="-O0"; p_debug="-ggdb3 -fno-omit-frame-pointer"
+        p_ruby_debug=1; p_gc_debug=0; p_rgengc=0; p_vm_check=0
+        p_sanitizer=""; p_compiler=default; p_devel=1; p_modgc=0
+        ;;
+    fast)
+        p_opt="-O3 -fno-omit-frame-pointer"; p_debug=""
+        p_ruby_debug=0; p_gc_debug=0; p_rgengc=0; p_vm_check=0
+        p_sanitizer=""; p_compiler=default; p_devel=0; p_modgc=0
+        ;;
+esac
+
+# --- Layer attributes on top of base ---
+
+[[ "$has_gc_debug" == "1" ]] && p_gc_debug=1
+
+case "$gc_check_attr" in
+    gc-check)     p_rgengc=2 ;;
+    gc-check-low) p_rgengc=1 ;;
+esac
+
+[[ "$has_vm_check" == "1" ]] && p_vm_check=1
+
+case "$sanitizer_attr" in
+    tsan) p_sanitizer=thread; p_compiler=clang ;;
+    asan) p_sanitizer=address; p_compiler=clang ;;
+esac
+
+[[ "$has_modgc" == "1" ]] && p_modgc=1
+[[ "$has_clang" == "1" ]] && p_compiler=clang
+
+# --- Env var overrides ---
+
+opt="${OPT_LEVEL:-$p_opt}"
+debug="${DEBUG_FLAGS:-$p_debug}"
+ruby_debug="${RUBY_DEBUG:-$p_ruby_debug}"
+gc_debug="${GC_DEBUG:-$p_gc_debug}"
+rgengc="${RGENGC_CHECK_MODE:-$p_rgengc}"
+vm_check="${VM_CHECK_MODE:-$p_vm_check}"
+sanitizer="${SANITIZER:-$p_sanitizer}"
+compiler="${COMPILER:-$p_compiler}"
+devel="${DEVEL:-$p_devel}"
+modgc="${MODULAR_GC:-$p_modgc}"
+
+# --- Build install prefix ---
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+
+if [[ -n "$custom_prefix" ]]; then
+    prefix="$custom_prefix"
+else
+    # Sort attributes alphabetically for a stable prefix.
+    # Exclude clang when implied by a sanitizer.
+    # Expand modgc=<name> to modgc-<name>.
+    prefix_parts=()
+    for attr in "${attrs[@]}"; do
+        case "$attr" in
+            clang)
+                [[ -z "$sanitizer_attr" ]] && prefix_parts+=("clang")
+                ;;
+            modgc=*)
+                prefix_parts+=("modgc-${attr#modgc=}")
+                ;;
+            *)
+                prefix_parts+=("$attr")
+                ;;
+        esac
+    done
+
+    IFS=$'\n' sorted=($(sort <<<"${prefix_parts[*]}")); unset IFS
+    joined=$(IFS=-; echo "${sorted[*]}")
+    prefix="$HOME/.rubies/ruby-${branch}-${joined}"
+fi
+
+# --- Build configure args ---
+
+configure_args=(--prefix="$prefix" --disable-install-doc)
+
+if [[ "$devel" == "1" ]]; then
+    configure_args+=(--enable-devel --enable-debug-env)
+fi
+
+if [[ "$modgc" == "1" ]]; then
+    configure_args+=(--with-modular-gc="$prefix/lib/ruby/gc")
+fi
+
+# JIT: dev mode with debug base, release mode with fast base
+case "$jit_attr" in
+    yjit)
+        if [[ "$base" == "debug" ]]; then
+            configure_args+=(--enable-yjit=dev)
+        else
+            configure_args+=(--enable-yjit)
+        fi
+        ;;
+    zjit)
+        if [[ "$base" == "debug" ]]; then
+            configure_args+=(--enable-zjit=dev)
+        else
+            configure_args+=(--enable-zjit)
+        fi
+        ;;
+esac
+
+configure_args+=(optflags="$opt")
+
+if [[ -n "$debug" ]]; then
+    configure_args+=(debugflags="$debug")
+else
+    configure_args+=(debugflags="")
+fi
+
+# Build cppflags
+cppflags=""
+[[ "$ruby_debug" != "0" ]] && cppflags+=" -DRUBY_DEBUG=$ruby_debug"
+[[ "$gc_debug" != "0" ]]   && cppflags+=" -DGC_DEBUG=$gc_debug"
+[[ "$rgengc" != "0" ]]     && cppflags+=" -DRGENGC_CHECK_MODE=$rgengc"
+[[ "$vm_check" != "0" ]]   && cppflags+=" -DVM_CHECK_MODE=$vm_check"
+cppflags="${cppflags# }"
+
+if [[ -n "$cppflags" ]]; then
+    configure_args+=(cppflags="$cppflags")
+fi
+
+if [[ -n "$sanitizer" ]]; then
+    configure_args+=(cflags="-fsanitize=$sanitizer" LDFLAGS="-fsanitize=$sanitizer")
+fi
+
+# Compiler
+if [[ "$compiler" == "clang" ]]; then
+    export CC="${CC:-clang}"
+    export CXX="${CXX:-clang++}"
+fi
+
+nproc_cmd="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+
+# --- Execute or dry-run ---
+
+if [[ "$dry_run" == "1" ]]; then
+    echo "# build-ruby dry-run: ${attrs[*]}  branch=$branch"
+    [[ "$compiler" == "clang" ]] && echo "export CC=${CC:-clang} CXX=${CXX:-clang++}"
+    echo "./configure \\"
+    for arg in "${configure_args[@]}"; do
+        if [[ "$arg" =~ [[:space:]] ]]; then
+            printf '    "%s" \\\n' "$arg"
+        else
+            printf '    %s \\\n' "$arg"
+        fi
+    done
+    echo ""
+    echo "make -j$nproc_cmd"
+    echo "rccgen"
+    echo "make install"
+    if [[ "$modgc" == "1" && -n "$gc_name" ]]; then
+        echo "make modular-gc MODULAR_GC=$gc_name"
+        echo "make install-modular-gc MODULAR_GC=$gc_name"
+    fi
+    exit 0
+fi
+
+echo "Building Ruby (${attrs[*]}) from branch: $branch"
+echo "Install prefix: $prefix"
+
+# Ruby's configure rejects empty LDFLAGS; unset it if nothing meaningful is there
+[[ -z "${LDFLAGS:-}" ]] && unset LDFLAGS
+
+./configure "${configure_args[@]}"
+make -j"$nproc_cmd"
+rccgen
+make install
+
+if [[ "$modgc" == "1" && -n "$gc_name" ]]; then
+    echo "Building modular GC: $gc_name"
+    make modular-gc MODULAR_GC="$gc_name"
+    make install-modular-gc MODULAR_GC="$gc_name"
+fi
+
+echo "Installed to: $prefix"

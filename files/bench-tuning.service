@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply benchmarking stability tweaks (governor, turbo, SMT, ASLR, THP, perf)
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bench-tuning
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
