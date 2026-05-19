@@ -284,7 +284,6 @@ if [[ "$dry_run" == "1" ]]; then
     done
     echo ""
     echo "make -j$nproc_cmd"
-    echo "rccgen"
     echo "make install"
     if [[ "$modgc" == "1" && -n "$gc_name" ]]; then
         echo "make modular-gc MODULAR_GC=$gc_name"
@@ -301,7 +300,6 @@ echo "Install prefix: $prefix"
 
 ./configure "${configure_args[@]}"
 make -j"$nproc_cmd"
-rccgen
 make install
 
 if [[ "$modgc" == "1" && -n "$gc_name" ]]; then
